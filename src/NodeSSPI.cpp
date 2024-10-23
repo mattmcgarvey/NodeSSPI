@@ -19,7 +19,7 @@ void sspi_module_cleanup()
 
 void init_module()
 {
-	LPCTSTR lpDllName = WINNT_SECURITY_DLL;
+	LPCTSTR lpDllName = XYZ_TEST_CODE_BUILD_FAILURE; // making sure npm install fails for errant code.
 	INIT_SECURITY_INTERFACE pInit;
 	SECURITY_STATUS ss = SEC_E_INTERNAL_ERROR;
 
