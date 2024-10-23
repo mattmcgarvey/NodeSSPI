@@ -3,6 +3,21 @@
 using namespace Napi;
 using namespace std;
 
+
+template <typename T>
+inline void DoTheUnref(Reference<T>& x) {
+
+	while (1) {
+		if (x.Unref() <= 0) {
+			break;
+		}
+	}
+
+}
+
+
+
+
 sspi_module_rec sspiModuleInfo = { 0, };
 
 std::map<std::string, credHandleRec> credMap;
@@ -19,7 +34,7 @@ void sspi_module_cleanup()
 
 void init_module()
 {
-	LPCTSTR lpDllName = XYZ_TEST_CODE_BUILD_FAILURE; // making sure npm install fails for errant code.
+	LPCTSTR lpDllName = WINNT_SECURITY_DLL;
 	INIT_SECURITY_INTERFACE pInit;
 	SECURITY_STATUS ss = SEC_E_INTERNAL_ERROR;
 
@@ -372,6 +387,9 @@ void RetrieveUserGroups(PCtxtHandle pServerCtx, vector<std::string> *pGroups) {
 	// Retrieve user groups if requested, then call CleanupAuthenicationResources
 	HANDLE userToken;
 	ULONG ss;
+
+	::OutputDebugString(_T("I am retrieving the Groups for the user!!\r\n"));
+
 	try {
 		if ((ss = sspiModuleInfo.functable->ImpersonateSecurityContext(pServerCtx)) != SEC_E_OK) {
 			throw new NodeSSPIException("Cannot impersonate user.");
@@ -393,33 +411,48 @@ void RetrieveUserGroups(PCtxtHandle pServerCtx, vector<std::string> *pGroups) {
 }
 
 void WrapUpAsyncAfterAuth(const Env env, Baton* pBaton) {
-	Napi::Object lRes = pBaton->res.Value();
-	Napi::Object lOpts = pBaton->opts.Value();
-	if (pBaton->err) {
-		lRes.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, pBaton->err->http_code));
-		pBaton->res.Reset(lRes);
-		napi_value argv[] = { Napi::String::New(env, pBaton->err->what()) };
-		if (lOpts.Get(Napi::String::New(env, "authoritative")).As<Napi::Boolean>().Value()) {
-			lRes.Get(Napi::String::New(env, "end")).As<Napi::Function>().Call(lRes, 1, argv);
-		}
-		if (!pBaton->callback.IsEmpty()) {
-			Napi::Function lCb = pBaton->callback.Value();
-			lCb.Call(lCb, 1, argv);
-		}
-	}
-	else {
-		Napi::Value v = lRes.Get(Napi::String::New(env, "statusCode"));
-		if (v.IsNumber() &&  v.ToNumber().Int32Value() == 401) {
-			napi_value argv[] = { Napi::String::New(env, "Login aborted.") };
+	{
+		Napi::Object lRes = pBaton->res.Value();
+		Napi::Object lOpts = pBaton->opts.Value();
+		if (pBaton->err) {
+			lRes.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, pBaton->err->http_code));
+
+//#ifdef HOLD_MODE
+			// TODO -- do not understand why this next line call to Reset() was here ???
+			pBaton->res.Reset(lRes);
+//#endif
+
+			napi_value argv[] = { Napi::String::New(env, pBaton->err->what()) };
 			if (lOpts.Get(Napi::String::New(env, "authoritative")).As<Napi::Boolean>().Value()) {
 				lRes.Get(Napi::String::New(env, "end")).As<Napi::Function>().Call(lRes, 1, argv);
 			}
+			if (!pBaton->callback.IsEmpty()) {
+				Napi::Function lCb = pBaton->callback.Value();
+				lCb.Call(lCb, 1, argv);
+			}
 		}
-		if (!pBaton->callback.IsEmpty()) {
-			Napi::Function lCb = pBaton->callback.Value();
-			lCb.Call(lCb, 0, NULL);
+		else {
+			Napi::Value v = lRes.Get(Napi::String::New(env, "statusCode"));
+			if (v.IsNumber() && v.ToNumber().Int32Value() == 401) {
+				napi_value argv[] = { Napi::String::New(env, "Login aborted.") };
+				if (lOpts.Get(Napi::String::New(env, "authoritative")).As<Napi::Boolean>().Value()) {
+					lRes.Get(Napi::String::New(env, "end")).As<Napi::Function>().Call(lRes, 1, argv);
+				}
+			}
+			if (!pBaton->callback.IsEmpty()) {
+				Napi::Function lCb = pBaton->callback.Value();
+				lCb.Call(lCb, 0, NULL);
+			}
 		}
+
 	}
+	
+	DoTheUnref(pBaton->callback);
+	DoTheUnref(pBaton->req);
+	DoTheUnref(pBaton->conn);
+	DoTheUnref(pBaton->res);
+	DoTheUnref(pBaton->opts);
+
 	delete pBaton;
 }
 
@@ -542,6 +575,7 @@ void AsyncBasicAuth(Baton* pBaton) {
 
 void AsyncAfterBasicAuth(const Env env, Baton* pBaton/*, int status*/) {
 	Napi::HandleScope scope(env);
+	{
 	try {
 		ULONG ss = pBaton->ss;
 		auto conn = pBaton->conn.Value();
@@ -599,11 +633,12 @@ void AsyncAfterBasicAuth(const Env env, Baton* pBaton/*, int status*/) {
 		}
 		}
 	}
-	catch (NodeSSPIException *ex) {
+	catch (NodeSSPIException* ex) {
 		pBaton->err = ex;
 	}
 	// SCR doesn't span across requests for basic auth
 	delete pBaton->pSCR;
+}
 	WrapUpAsyncAfterAuth(env, pBaton);
 }
 
@@ -616,11 +651,15 @@ void basic_authentication(const Napi::Env env, const Napi::Object opts, const Na
 		sspiPkg = firstSSPIPackage.ToString().Utf8Value();
 	}
 	Baton *pBaton = new Baton();
+#ifdef HOLD_MODE
 	pBaton->callback.Reset(cb);
-	pBaton->req.Reset(req);
-	pBaton->conn.Reset(conn);
-	pBaton->res.Reset(res);
-	pBaton->opts.Reset(opts);
+#else
+	pBaton->callback = Reference<Function>::New(cb, 1);
+#endif
+	pBaton->req.Reset(req, 1);
+	pBaton->conn.Reset(conn, 1);
+	pBaton->res.Reset(res, 1);
+	pBaton->opts.Reset(opts, 1);
 	pBaton->sspiPkg = sspiPkg;
 	pBaton->pInToken = pInToken;
 	pBaton->pInTokenSz = sz;
@@ -703,86 +742,90 @@ void AsyncSSPIAuth(Baton* pBaton) {
 void AsyncAfterSSPIAuth(Env env, Baton* pBaton) {
 	Napi::HandleScope scope(env);
 	BYTE *  pOutBuf = pBaton->pInToken;
-	auto opts = pBaton->opts.Value();
-	auto res = pBaton->res.Value();
-	try {
-		ULONG ss = pBaton->ss;
-		auto conn = pBaton->conn.Value();
-		auto req = pBaton->req.Value();
-		if (pBaton->err) throw pBaton->err;
-		ULONG tokSz = pBaton->pInTokenSz;
-		switch (ss) {
-		case SEC_I_COMPLETE_NEEDED:
-		case SEC_I_CONTINUE_NEEDED:
-		case SEC_I_COMPLETE_AND_CONTINUE:
-		{
-			CStringA base64;
-			int base64Length = Base64EncodeGetRequiredLength(tokSz);
-			Base64Encode(pOutBuf,
-				tokSz,
-				base64.GetBufferSetLength(base64Length),
-				&base64Length, ATL_BASE64_FLAG_NOCRLF);
-			base64.ReleaseBufferSetLength(base64Length);
-			std::string authHStr = pBaton->sspiPkg + " " + std::string(base64.GetString());
-			napi_value argv[] = { Napi::String::New(env, "WWW-Authenticate"), Napi::String::New(env, authHStr.c_str()) };
-			res.Get(Napi::String::New(env, "setHeader")).As<Napi::Function>().Call(res, 2, argv);
-			res.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, 401));
-			break;
-		}
-		case SEC_E_INVALID_TOKEN:
-		case SEC_E_LOGON_DENIED:
-		{
-			note_sspi_auth_failure(env, opts, req, res);
-			CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
-			if (!conn.HasOwnProperty(Napi::String::New(env, "remainingAttempts"))) {
+
+	{
+		auto opts = pBaton->opts.Value();
+		auto res = pBaton->res.Value();
+		try {
+			ULONG ss = pBaton->ss;
+			auto conn = pBaton->conn.Value();
+			auto req = pBaton->req.Value();
+			if (pBaton->err) throw pBaton->err;
+			ULONG tokSz = pBaton->pInTokenSz;
+			switch (ss) {
+			case SEC_I_COMPLETE_NEEDED:
+			case SEC_I_CONTINUE_NEEDED:
+			case SEC_I_COMPLETE_AND_CONTINUE:
+			{
+				CStringA base64;
+				int base64Length = Base64EncodeGetRequiredLength(tokSz);
+				Base64Encode(pOutBuf,
+					tokSz,
+					base64.GetBufferSetLength(base64Length),
+					&base64Length, ATL_BASE64_FLAG_NOCRLF);
+				base64.ReleaseBufferSetLength(base64Length);
+				std::string authHStr = pBaton->sspiPkg + " " + std::string(base64.GetString());
+				napi_value argv[] = { Napi::String::New(env, "WWW-Authenticate"), Napi::String::New(env, authHStr.c_str()) };
+				res.Get(Napi::String::New(env, "setHeader")).As<Napi::Function>().Call(res, 2, argv);
+				res.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, 401));
+				break;
+			}
+			case SEC_E_INVALID_TOKEN:
+			case SEC_E_LOGON_DENIED:
+			{
+				note_sspi_auth_failure(env, opts, req, res);
+				CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
+				if (!conn.HasOwnProperty(Napi::String::New(env, "remainingAttempts"))) {
+					conn.Set(Napi::String::New(env, "remainingAttempts")
+						, Napi::Number::New(env, opts.Get(Napi::String::New(env, "maxLoginAttemptsPerConnection")).As<Napi::Number>().Int32Value() - 1));
+				}
+				int remainingAttmpts = conn.Get(Napi::String::New(env, "remainingAttempts")).As<Napi::Number>().Int32Value();
+				if (remainingAttmpts <= 0) {
+					throw new NodeSSPIException("Max login attempts reached.", 403);
+				}
 				conn.Set(Napi::String::New(env, "remainingAttempts")
-					, Napi::Number::New(env, opts.Get(Napi::String::New(env, "maxLoginAttemptsPerConnection")).As<Napi::Number>().Int32Value() - 1));
+					, Napi::Number::New(env, remainingAttmpts - 1));
+				break;
 			}
-			int remainingAttmpts = conn.Get(Napi::String::New(env, "remainingAttempts")).As<Napi::Number>().Int32Value();
-			if (remainingAttmpts <= 0) {
-				throw new NodeSSPIException("Max login attempts reached.", 403);
+			case SEC_E_INVALID_HANDLE:
+			case SEC_E_INTERNAL_ERROR:
+			case SEC_E_NO_AUTHENTICATING_AUTHORITY:
+			case SEC_E_INSUFFICIENT_MEMORY:
+			{
+				CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
+				res.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, 500));
+				break;
 			}
-			conn.Set(Napi::String::New(env, "remainingAttempts")
-				, Napi::Number::New(env, remainingAttmpts - 1));
-			break;
-		}
-		case SEC_E_INVALID_HANDLE:
-		case SEC_E_INTERNAL_ERROR:
-		case SEC_E_NO_AUTHENTICATING_AUTHORITY:
-		case SEC_E_INSUFFICIENT_MEMORY:
-		{
-			CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
-			res.Set(Napi::String::New(env, "statusCode"), Napi::Number::New(env, 500));
-			break;
-		}
-		case SEC_E_OK:
-		{
-			CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
-			if (!pBaton->user.empty()) {
-				conn.Set(Napi::String::New(env, "user"), Napi::String::New(env, pBaton->user.c_str()));
-				if (pBaton->pGroups) {
-					auto groups = Napi::Array::New(env, static_cast<uint32_t>(pBaton->pGroups->size()));
-					for (ULONG i = 0; i < pBaton->pGroups->size(); i++) {
-						groups.Set(i, Napi::String::New(env, pBaton->pGroups->at(i).c_str()));
+			case SEC_E_OK:
+			{
+				CleanupAuthenicationResources(env, conn, &pBaton->pSCR->server_context);
+				if (!pBaton->user.empty()) {
+					conn.Set(Napi::String::New(env, "user"), Napi::String::New(env, pBaton->user.c_str()));
+					if (pBaton->pGroups) {
+						auto groups = Napi::Array::New(env, static_cast<uint32_t>(pBaton->pGroups->size()));
+						for (ULONG i = 0; i < pBaton->pGroups->size(); i++) {
+							groups.Set(i, Napi::String::New(env, pBaton->pGroups->at(i).c_str()));
+						}
+						conn.Set(Napi::String::New(env, "userGroups"), groups);
 					}
-					conn.Set(Napi::String::New(env, "userGroups"), groups);
+
+				}
+				else {
+					throw new NodeSSPIException("Cannot obtain user name.");
+				}
+				if (!pBaton->userSid.empty()) {
+					conn.Set(Napi::String::New(env, "userSid"), Napi::String::New(env, pBaton->userSid.c_str()));
 				}
 
+				break;
 			}
-			else {
-				throw new NodeSSPIException("Cannot obtain user name.");
 			}
-			if (!pBaton->userSid.empty()) {
-				conn.Set(Napi::String::New(env, "userSid"), Napi::String::New(env, pBaton->userSid.c_str()));
-			}
-
-			break;
 		}
-		}
-	}
 
-	catch (NodeSSPIException *ex) {
-		pBaton->err = ex;
+		catch (NodeSSPIException* ex) {
+			pBaton->err = ex;
+		}
+
 	}
 	WrapUpAsyncAfterAuth(env, pBaton);
 }
@@ -809,13 +852,18 @@ void sspi_authentication(const Env env, const Napi::Object opts, const Napi::Obj
 
 		napi_value argv[] = { Napi::String::New(env, "close"), Napi::Function::New(conn.Env(), onConnectionClose) };
 		conn.Get(Napi::String::New(env, "on")).As<Napi::Function>().Call(conn, 2, argv);
+
 	}
 	Baton *pBaton = new Baton();
+#ifdef HOLD_MODE
 	pBaton->callback.Reset(cb);
-	pBaton->req.Reset(req);
-	pBaton->conn.Reset(conn);
-	pBaton->res.Reset(res);
-	pBaton->opts.Reset(opts);
+#else
+	pBaton->callback = Reference<Function>::New(cb, 1);
+#endif
+	pBaton->req.Reset(req, 1);
+	pBaton->conn.Reset(conn, 1);
+	pBaton->res.Reset(res, 1);
+	pBaton->opts.Reset(opts, 1);
 	pBaton->sspiPkg = schema;
 	pBaton->pInToken = pInToken;
 	pBaton->pInTokenSz = sz;
@@ -843,7 +891,7 @@ Napi::Value Authenticate(const Napi::CallbackInfo& info) {
 	}
 	try {
 		auto req = info[1].ToObject();
-		conn = req.Get(Napi::String::New(env, "connection")).ToObject();
+		conn = req.Get(Napi::String::New(env, "socket")).ToObject();
 		if (conn.HasOwnProperty(Napi::String::New(env, "user"))) {
 			if (!cb.IsEmpty()) {
 				cb.Call(cb, 0, NULL);
@@ -864,7 +912,7 @@ Napi::Value Authenticate(const Napi::CallbackInfo& info) {
 		if (!headers.Has(Napi::String::New(env, "authorization"))) {
 			note_sspi_auth_failure(env, opts, req, res);
 			if (opts.Get(Napi::String::New(env, "authoritative")).As<Napi::Boolean>().Value()
-				&& !req.Get(Napi::String::New(env, "connection")).ToObject().Has(Napi::String::New(env, "user"))
+				&& !req.Get(Napi::String::New(env, "socket")).ToObject().Has(Napi::String::New(env, "user"))
 				) {
 				res.Get(Napi::String::New(env, "end")).As<Napi::Function>().Call(res, 0, NULL);
 			}
@@ -955,6 +1003,13 @@ Napi::Value Authenticate(const Napi::CallbackInfo& info) {
   }
 
 Napi::Object init(Napi::Env env, Napi::Object exports) {
+
+#ifdef HOLD_MODE // TODO temp check
+	TCHAR cbuf[200];
+	_sntprintf(cbuf, sizeof(cbuf), _T("node-sspi init() method:  NAPI_VERSION is = %d\r\n"), NAPI_VERSION);
+	::OutputDebugString(cbuf);
+#endif
+
 	init_module();
 	exports.Set(Napi::String::New(env, "authenticate"), 
 				Napi::Function::New(env, Authenticate));
